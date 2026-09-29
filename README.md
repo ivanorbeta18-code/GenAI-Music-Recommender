@@ -1,21 +1,19 @@
 # GenAI Music Recommender (MVP)
 
-Recommends tracks based on your favorite **genre**, **artist**, and **mood**,
-using a real Spotify tracks dataset (~114k tracks). Pandas narrows the
-dataset to a relevant shortlist; Claude (Anthropic API) reasons over that
-shortlist to pick the final tracks and explain each pick. A second panel
-lets you ask a Hugging Face-powered chatbot free-form questions about the
-dataset.
+CS 315 – Activity 3
+
+Recommends tracks based on your favorite **genre**, **artist**, and **mood**, using a real Spotify tracks dataset (~114k tracks). Pandas narrows the dataset to a relevant shortlist, then a **Hugging Face** model reasons over that shortlist to pick the final tracks and explain each pick. A second tab is a chatbot, powered by the same model, that answers free-form questions about the dataset.
+
+> **Scope:** every recommendation and chatbot answer is limited to the tracks in the loaded dataset. The app is not connected to Spotify or any live music service.
 
 ## Why "mood" instead of "time period"
 
-The bundled dataset (`data/spotify_dataset.csv`) doesn't include a release
-year. Instead, each track is scored on two audio features it *does* have:
+The dataset has no release year. Instead, each track is scored on two audio features it does have:
 
-- **valence** — how musically positive/happy a track sounds
-- **energy** — how intense/active a track sounds
+- **valence**: how musically positive a track sounds
+- **energy**: how intense or active a track sounds
 
-Those two combine into four mood quadrants used throughout the app:
+Splitting each at 0.5 gives four mood quadrants used throughout the app:
 
 | valence | energy | mood              |
 |---------|--------|-------------------|
@@ -24,110 +22,103 @@ Those two combine into four mood quadrants used throughout the app:
 | low     | high   | Angry & Intense   |
 | low     | low    | Sad & Mellow      |
 
-**Popularity** (0–100) is the second filter axis, letting users dial between
-mainstream hits and obscure/unheard tracks.
+**Popularity** (0-100) is the second filter, letting users choose between obscure and mainstream tracks.
 
 ## Project structure
 
 ```
 music_recommender_app/
-├── app.py                          # Streamlit UI + app flow (2 tabs)
+├── app.py                      # Streamlit UI and app flow (2 tabs)
 ├── requirements.txt
+├── README.md
+├── .gitignore                  # keeps .streamlit/secrets.toml out of Git
 ├── data/
-│   └── spotify_dataset.csv         # real Spotify tracks dataset (~114k rows)
+│   └── spotify_dataset.csv     # Spotify tracks dataset (~114k rows)
 ├── utils/
-│   ├── data_utils.py               # load/clean/filter + mood scoring + chatbot relevance gate
-│   └── ai_utils.py                 # Claude (recommendations) + Hugging Face (chatbot)
+│   ├── __init__.py
+│   ├── data_utils.py           # load/clean, mood scoring, candidate filter, chatbot relevance gate
+│   ├── ai_utils.py             # Hugging Face calls (recommendations + chatbot)
+│   └── theme.py                # CSS, mood colors, badges, valence/energy diagram
 └── .streamlit/
-    └── secrets.toml.example        # template for your API keys
+    ├── config.toml             # dark theme
+    ├── secrets.toml            # your real HF_TOKEN (git-ignored)
+    └── secrets.toml.example    # template for the secrets file
 ```
 
 ## 1. Dataset
 
-`data/spotify_dataset.csv` needs at least these columns (the app
-auto-renames a few common variants, e.g. Kaggle's `artists`/`track_genre`):
+`data/spotify_dataset.csv` needs at least these columns. The app auto-renames common Kaggle variants (`artists`/`artist` to `artist_name`, `track_genre`/`genres` to `genre`) and drops a stray unnamed index column.
 
-| required    | notes            |
-|-------------|------------------|
-| track_name  | song title       |
-| artist_name | artist           |
-| genre       | genre label      |
+| required    | notes       |
+|-------------|-------------|
+| track_name  | song title  |
+| artist_name | artist      |
+| genre       | genre label |
 
-Optional columns like `popularity`, `valence`, `energy`, `danceability`,
-`tempo`, etc. are used when present (they power the mood scoring and the
-popularity filter) but aren't strictly required. You can swap in your own
-CSV via the app's sidebar — no code changes needed.
+Optional numeric columns (`popularity`, `valence`, `energy`, `danceability`, `tempo`, etc.) are used when present. `valence` and `energy` power the mood scoring, and `popularity` powers the popularity filter. You can swap in your own Spotify-style CSV from the sidebar with no code changes.
 
-## 2. Run locally
+## 2. Setup and run locally
 
 ```bash
 cd music_recommender_app
 pip install -r requirements.txt
-
-# Option A: paste your keys in the sidebar at runtime (fastest for testing)
-streamlit run app.py
-
-# Option B: use a secrets file instead
-cp .streamlit/secrets.toml.example .streamlit/secrets.toml
-# then edit .streamlit/secrets.toml and add your real keys
-streamlit run app.py
 ```
 
-- Get a Claude API key at https://console.anthropic.com.
-- Get a Hugging Face access token at https://huggingface.co/settings/tokens.
+1. Create a Hugging Face access token at https://huggingface.co/settings/tokens.
+2. Copy the template and add your token:
+   ```bash
+   cp .streamlit/secrets.toml.example .streamlit/secrets.toml
+   ```
+   ```toml
+   # .streamlit/secrets.toml
+   HF_TOKEN = "hf_..."
+   ```
+3. Run the app:
+   ```bash
+   streamlit run app.py
+   ```
+
+There are no key fields in the UI. The token is read from `st.secrets`. **Never commit `secrets.toml`**; `.gitignore` already excludes it. If a token is ever exposed, revoke it in your Hugging Face settings and create a new one.
 
 ## 3. How it works
 
-### Recommendation engine (Tab 1)
-1. **Load & clean** — `utils/data_utils.load_dataset()` loads the CSV with
-   Pandas, normalizes column names, drops bad rows, and computes a `mood`
-   column from `valence` + `energy`.
-2. **Pick favorites** — multiselect genres, multiselect artists (scoped to
-   chosen genres), multiselect moods, and a popularity-range slider.
-3. **Narrow candidates** — `filter_candidates()` scores every track by how
-   well it matches genre/artist/mood/popularity and keeps the top ~60, so
-   the AI step only ever sees a relevant, small shortlist.
-4. **GenAI reasoning** — `utils/ai_utils.get_recommendations()` sends that
-   shortlist plus your stated favorites to Claude, which is instructed to
-   only pick from the list (no invented tracks) and explain each pick.
-5. **Display & visualize** — recommendations are shown as cards with a
-   one-line reason each, plus two bar charts (genre mix, mood mix) built
-   with Streamlit's native charting.
+### Recommendation engine (Tab 1: Get Recommendations)
+1. **Load and clean**: `data_utils.load_dataset()` reads the CSV, normalizes column names, drops rows missing required fields, coerces numeric columns, fills missing valence/energy with the median, clips popularity to 0-100, adds the `mood` column, and drops duplicate (track, artist) pairs. The result is cached with `@st.cache_data`.
+2. **Pick favorites**: multiselect genres, artists (scoped to the chosen genres) and moods, plus a popularity range slider and a "how many recommendations" slider (3-15). If nothing is selected, a confirmation dialog warns that results will be based on popularity alone.
+3. **Narrow candidates**: `filter_candidates()` scores every track (genre match +2, artist match +3, mood match +2, popularity in range +1, plus a small popularity bonus) and keeps the top 60, so the model only sees a small, relevant shortlist.
+4. **GenAI reasoning**: `ai_utils.get_recommendations()` sends the shortlist and the user's favorites to the model, which is told to pick only from the list and to return JSON with `track_name`, `artist_name`, `genre`, `mood` and a one-sentence `reason`. Code fences are stripped, and if the JSON is invalid the app shows the raw output instead of crashing.
+5. **Display and visualize**: results appear as cards with a left border colored by mood, plus mood and genre badges. Two Altair bar charts show the genre mix and mood mix, and an expander shows the full pandas candidate shortlist.
 
-### Dataset chatbot (Tab 2)
-1. You type a free-form question in a `st.chat_input` box.
-2. **Relevance gate** — `data_utils.is_dataset_related()` checks the
-   question's words against a vocabulary built from the dataset's genres,
-   artist-name words, and a set of music/recommendation keywords (e.g.
-   *recommend*, *mood*, *popular*, *unheard*). Off-topic input (`"hi"`,
-   `"who is the US president"`) is declined immediately, **without**
-   calling any AI model.
-3. **Grounded answer** — for on-topic questions, `ai_utils.ask_dataset_question()`
-   pulls a small relevant slice of the dataset (matching genre/mood/artist
-   words in the question) as context, then sends it to a Hugging Face chat
-   model with instructions to only reference tracks/artists from that
-   context.
+### Dataset chatbot (Tab 2: Ask the Dataset)
+1. You type a question into `st.chat_input`.
+2. **Relevance gate**: `data_utils.is_dataset_related()` checks the question against a vocabulary of music keywords, genre words and full multi-word artist names. Off-topic input (e.g. "hi", "who is the US president") gets a canned refusal **without calling the model**.
+3. **Grounded answer**: for on-topic questions, `ai_utils.ask_dataset_question_stream()` pulls the 40 most relevant rows as context and asks the model to answer only from them. The reply streams into the chat with `st.write_stream`.
+4. The chat lives in a fixed-height scroll container with a **Clear chat** button.
+
+### Model
+Both features use one instruction-tuned model through the Hugging Face Inference API: `Qwen/Qwen3-4B-Instruct-2507` (set by `DEFAULT_HF_MODEL` in `utils/ai_utils.py`).
 
 ## 4. Deploy to Streamlit Community Cloud
 
-1. Push this folder to a public (or connected private) GitHub repo.
+1. Push the project folder to GitHub. `secrets.toml` stays out because of `.gitignore`.
 2. Go to https://share.streamlit.io and click **New app**.
-3. Point it at your repo, branch, and `app.py`.
+3. Select your repo, branch and `app.py`.
 4. In the app's **Settings → Secrets**, paste:
    ```toml
-   ANTHROPIC_API_KEY = "sk-ant-..."
-   HF_API_KEY = "hf_..."
+   HF_TOKEN = "hf_..."
    ```
-5. Deploy. Users won't need to paste API keys — the app already falls back
-   to `st.secrets` when present.
+5. Deploy. Users never see or type a key.
 
-## 5. Next steps
+## 5. Testing notes
 
-- Swap `DEFAULT_HF_MODEL` in `utils/ai_utils.py` for a different
-  instruction-tuned model if your Hugging Face token doesn't have access
-  to the default one.
-- Tighten the chatbot's relevance gate further (e.g. a small zero-shot
-  classification call) if keyword matching lets too much through.
-- Add more filters (danceability threshold, explicit-content toggle).
-- Swap the bar charts for Plotly/Altair for richer, interactive visuals.
-- Cache Claude/Hugging Face responses per unique query to reduce API calls.
+Tested with on-topic chat prompts ("Recommend me a chill indie artist"), off-topic prompts ("hi"), each filter alone and combined, no favorites selected, narrow popularity ranges (0-20, 80-100), and a custom uploaded CSV.
+
+Improvements from testing: artist names are matched as full phrases (single words like "weather" made almost anything look on-topic), chat moved into a scrollable box, replies stream instead of waiting on a spinner, and a JSON-fallback parser was added.
+
+## 6. Next steps
+
+- Add more filters (danceability, tempo, explicit-content toggle).
+- Add a "similar to this track" feature.
+- Cache model responses per unique query to reduce API calls.
+- Replace the keyword relevance gate with a small zero-shot classifier if too much off-topic input slips through.
+- Try a different instruction-tuned model if your token lacks access to the default (for example `HuggingFaceTB/SmolLM2-1.7B-Instruct` for faster, lighter responses).
