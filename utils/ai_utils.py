@@ -171,6 +171,23 @@ def build_chat_context(df, question: str, history=None, max_rows: int = 80) -> s
     return json.dumps(records, ensure_ascii=False)
 
 
+def build_dataset_stats(df) -> str:
+    """Whole-dataset facts computed by pandas, so the model never has to
+    count or average rows from the small excerpt it is shown."""
+    stats = {"total_tracks": int(len(df))}
+    if "artist_name" in df.columns:
+        stats["unique_artists"] = int(df["artist_name"].nunique())
+    if "genre" in df.columns:
+        stats["unique_genres"] = int(df["genre"].nunique())
+        stats["genres"] = sorted(df["genre"].dropna().unique().tolist())
+    if "mood" in df.columns:
+        stats["tracks_per_mood"] = {k: int(v) for k, v in df["mood"].value_counts().items()}
+    for col in ["popularity", "danceability", "energy", "valence", "tempo"]:
+        if col in df.columns:
+            stats[f"average_{col}"] = round(float(df[col].mean()), 3)
+    return json.dumps(stats, ensure_ascii=False)
+
+
 def _build_chat_messages(df, question: str, history=None):
     """System prompt (with dataset excerpt) + the last few turns of the
     conversation + the new question."""
@@ -184,7 +201,12 @@ def _build_chat_messages(df, question: str, history=None):
         "conversation to understand what the user means by words like "
         "'those', 'that artist', or 'more'. When the user asks for a list, "
         "give as many items as they ask for (or as many as are useful) and "
-        "finish the list completely.\n\nDataset excerpt (JSON):\n" + context
+        "finish the list completely. For any question about totals, counts, "
+        "or averages across the whole dataset, use ONLY the 'Whole-dataset "
+        "statistics' below; the excerpt is just a small sample and must "
+        "never be counted.\n\nWhole-dataset statistics (JSON):\n"
+        + build_dataset_stats(df)
+        + "\n\nDataset excerpt (JSON, sample rows only):\n" + context
     )
     messages = [{"role": "system", "content": system_prompt}]
     for role, content in (history or [])[-HISTORY_TURNS:]:
