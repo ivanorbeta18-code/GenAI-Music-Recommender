@@ -6,9 +6,11 @@ features of the app:
   shortlist, the model picks + explains the final track recommendations.
 - **Dataset chatbot** — answers free-form user questions about the
   dataset (e.g. "recommend me a chill artist", "give me a random unheard
-  pop track"). The app only calls it for questions that pass
-  `data_utils.is_dataset_related()` — everything else (greetings, trivia,
-  general knowledge) gets a canned refusal instead of an API call.
+  pop track"). It now receives the recent conversation history, so
+  follow-ups like "give me more of those" make sense. The app only calls
+  it for questions that pass `data_utils.is_dataset_related()` (or look
+  like a follow-up to an earlier answer) — everything else gets a canned
+  refusal instead of an API call.
 
 The Hugging Face access token is never typed into the UI. It's read once
 from `.streamlit/secrets.toml` (see `get_hf_token()` below), which is
@@ -26,6 +28,14 @@ import streamlit as st
 # from this context" instructions well. For a faster/lighter option under
 # free-tier rate limits, try "HuggingFaceTB/SmolLM2-1.7B-Instruct" instead.
 DEFAULT_HF_MODEL = "Qwen/Qwen3-4B-Instruct-2507"
+
+# Max tokens the model may generate per chatbot answer. Raised from 300 so
+# long lists don't get cut off mid-sentence.
+CHAT_MAX_TOKENS = 1500
+
+# How many past messages (user + assistant combined) are sent back to the
+# model so it can resolve "those", "that artist", "more", etc.
+HISTORY_TURNS = 6
 
 REFUSAL_MESSAGE = (
     "I can only help with questions about this specific dataset — things "
@@ -131,14 +141,16 @@ def get_recommendations(hf_model, genres, artists, moods, popularity_range, cand
 
 
 # ---------------------------------------------------------------------------
-# Hugging Face: dataset chatbot
+# Hugging Face: dataset chatbot (with conversation history)
 # ---------------------------------------------------------------------------
 
-def build_chat_context(df, question: str, max_rows: int = 40) -> str:
+def build_chat_context(df, question: str, history=None, max_rows: int = 80) -> str:
     """Builds a small, relevant slice of the dataset as grounding context
     for the Hugging Face model, so it answers from real rows instead of
-    hallucinating tracks or artists."""
-    words = set(re.findall(r"[a-z0-9']+", question.lower()))
+    hallucinating tracks or artists. Also looks at the last couple of user
+    messages, so a follow-up like "more of those" still pulls the right rows."""
+    recent_user = [c for r, c in (history or []) if r == "user"][-2:]
+    words = set(re.findall(r"[a-z0-9']+", " ".join(recent_user + [question]).lower()))
 
     scored = df.copy()
     scored["_hit"] = 0
@@ -159,11 +171,31 @@ def build_chat_context(df, question: str, max_rows: int = 40) -> str:
     return json.dumps(records, ensure_ascii=False)
 
 
-def ask_dataset_question(hf_model: str, df, question: str) -> str:
-    """Answers a dataset-related question using a Hugging Face chat model.
-    Caller is expected to have already checked `is_dataset_related()` —
-    this function does not re-check relevance, it just answers. Uses the
-    token embedded via `get_hf_token()`."""
+def _build_chat_messages(df, question: str, history=None):
+    """System prompt (with dataset excerpt) + the last few turns of the
+    conversation + the new question."""
+    context = build_chat_context(df, question, history)
+    system_prompt = (
+        "You are a music dataset assistant. Answer ONLY using the track "
+        "data given below. Any track or artist you mention must come from "
+        "this data, never invented. You have no knowledge of music outside "
+        "this dataset; if the data can't answer the question, say so "
+        "plainly instead of guessing. Use the earlier messages in this "
+        "conversation to understand what the user means by words like "
+        "'those', 'that artist', or 'more'. When the user asks for a list, "
+        "give as many items as they ask for (or as many as are useful) and "
+        "finish the list completely.\n\nDataset excerpt (JSON):\n" + context
+    )
+    messages = [{"role": "system", "content": system_prompt}]
+    for role, content in (history or [])[-HISTORY_TURNS:]:
+        messages.append({"role": role, "content": content})
+    messages.append({"role": "user", "content": question})
+    return messages
+
+
+def ask_dataset_question(hf_model: str, df, question: str, history=None) -> str:
+    """Non-streaming version. Caller is expected to have already checked
+    relevance. `history` is a list of (role, content) tuples."""
     from huggingface_hub import InferenceClient
 
     hf_token = get_hf_token()
@@ -173,33 +205,19 @@ def ask_dataset_question(hf_model: str, df, question: str) -> str:
             ".streamlit/secrets.toml (see secrets.toml.example)."
         )
 
-    context = build_chat_context(df, question)
-    system_prompt = (
-        "You are a music dataset assistant. Answer ONLY using the track "
-        "data given to you below — if you recommend or mention a track or "
-        "artist, it must come from this data, never invented. You have no "
-        "knowledge of music outside this dataset; if the data below can't "
-        "answer the question, say so plainly instead of guessing. Keep "
-        "answers short (2-4 sentences).\n\nDataset excerpt (JSON):\n" + context
-    )
-
     client = InferenceClient(model=hf_model, token=hf_token)
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": question},
-    ]
-
-    response = client.chat_completion(messages=messages, max_tokens=300, temperature=0.6)
+    response = client.chat_completion(
+        messages=_build_chat_messages(df, question, history),
+        max_tokens=CHAT_MAX_TOKENS,
+        temperature=0.6,
+    )
     return response.choices[0].message.content.strip()
 
 
-def ask_dataset_question_stream(hf_model: str, df, question: str):
-    """Same as `ask_dataset_question`, but yields the answer as it's
-    generated (token by token / chunk by chunk) instead of returning it
-    all at once. Meant to be passed straight to `st.write_stream()` so the
-    chat UI shows the model "typing" and the page follows it down, rather
-    than sitting on a spinner and then dumping the full answer at once.
-    Caller is expected to have already checked `is_dataset_related()`."""
+def ask_dataset_question_stream(hf_model: str, df, question: str, history=None):
+    """Streaming version: yields the answer chunk by chunk, meant to be
+    passed straight to `st.write_stream()`. `history` is a list of
+    (role, content) tuples from earlier in the conversation."""
     from huggingface_hub import InferenceClient
 
     hf_token = get_hf_token()
@@ -209,24 +227,18 @@ def ask_dataset_question_stream(hf_model: str, df, question: str):
             ".streamlit/secrets.toml (see secrets.toml.example)."
         )
 
-    context = build_chat_context(df, question)
-    system_prompt = (
-        "You are a music dataset assistant. Answer ONLY using the track "
-        "data given to you below — if you recommend or mention a track or "
-        "artist, it must come from this data, never invented. You have no "
-        "knowledge of music outside this dataset; if the data below can't "
-        "answer the question, say so plainly instead of guessing. Keep "
-        "answers short (2-4 sentences).\n\nDataset excerpt (JSON):\n" + context
-    )
-
     client = InferenceClient(model=hf_model, token=hf_token)
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": question},
-    ]
-
-    stream = client.chat_completion(messages=messages, max_tokens=300, temperature=0.6, stream=True)
+    stream = client.chat_completion(
+        messages=_build_chat_messages(df, question, history),
+        max_tokens=CHAT_MAX_TOKENS,
+        temperature=0.6,
+        stream=True,
+    )
     for chunk in stream:
+        # The final chunk of a stream can have an empty `choices` list;
+        # indexing it caused "list index out of range".
+        if not chunk.choices:
+            continue
         delta = chunk.choices[0].delta.content
         if delta:
             yield delta
