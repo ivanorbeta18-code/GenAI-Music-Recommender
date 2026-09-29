@@ -12,8 +12,10 @@ recommendations.
 
 A second GenAI feature — the same Hugging Face model, used as a chatbot —
 answers free-form questions about the dataset ("recommend me a chill
-artist", "give me a random unheard pop track") and politely declines
-anything unrelated to the dataset ("hi", "who is the US president").
+artist", "give me a random unheard pop track"). It remembers the earlier
+messages in the chat, so follow-ups like "give me more of those" work, and
+it politely declines anything unrelated to the dataset ("hi", "who is the
+US president").
 
 No API key is ever typed into the UI: the Hugging Face token is embedded
 in the app via `.streamlit/secrets.toml` (see `secrets.toml.example` and
@@ -21,6 +23,7 @@ in the app via `.streamlit/secrets.toml` (see `secrets.toml.example` and
 """
 
 import os
+import re
 
 import altair as alt
 import pandas as pd
@@ -45,6 +48,25 @@ from utils.theme import (
 
 DEFAULT_DATA_PATH = os.path.join(os.path.dirname(__file__), "data", "spotify_dataset.csv")
 
+# Words that signal "I'm referring to something from earlier in the chat".
+FOLLOWUP_WORDS = {
+    "more", "another", "those", "that", "them", "it", "these", "this",
+    "first", "second", "third", "last", "other", "else", "again", "same",
+    "why", "which", "him", "her", "their", "one",
+}
+
+# Messages that shouldn't be sent back to the model as conversation history.
+ERROR_PREFIXES = ("Something went wrong", "Add HF_TOKEN")
+
+
+def is_followup(question: str, history) -> bool:
+    """True if there's a real earlier answer and this short message looks
+    like a follow-up to it (so it shouldn't be refused as off-topic)."""
+    has_prior = any(r == "assistant" for r, _ in history)
+    words = set(re.findall(r"[a-z']+", question.lower()))
+    return has_prior and len(words) <= 12 and bool(words & FOLLOWUP_WORDS)
+
+
 st.set_page_config(page_title="GenAI Music Recommender", page_icon="🎧", layout="wide")
 st.markdown(inject_css(), unsafe_allow_html=True)
 
@@ -60,9 +82,8 @@ st.caption(
 st.warning(
     "⚠️ **Scope disclosure:** every recommendation and every chatbot answer "
     "in this app is limited strictly to tracks/artists/genres in the "
-    "dataset currently loaded (bundled dataset, or your uploaded CSV)" 
-    "and it is uploaded in 2022. It cannot recommend or discuss music "
-    "outside that dataset, and it isn't "
+    "dataset currently loaded (bundled dataset, or your uploaded CSV). It "
+    "cannot recommend or discuss music outside that dataset, and it isn't "
     "connected to Spotify or any other live music service.",
     icon="⚠️",
 )
@@ -105,10 +126,7 @@ except ValueError as e:
 if uploaded is None:
     st.info(
         "Using the bundled Spotify Tracks dataset (~114k tracks). Upload "
-        "your own Spotify-style CSV in the sidebar to use different data. "
-        "**Note:** this dataset has no release-year column, so mood "
-        "(valence + energy) and popularity are used instead of a "
-        "time-period filter.",
+        "your own Spotify-style CSV in the sidebar to use different data.",
         icon="ℹ️",
     )
 
@@ -207,7 +225,7 @@ with tab_recommend:
                     hf_model, fav_genres, fav_artists, fav_moods, popularity_range, candidates, n_recommend
                 )
             except Exception as e:
-                st.error(f"Couldn't reach the Hugging Face model: {e}")
+                st.error(f"Something went wrong while getting recommendations: {e}")
                 st.stop()
 
         recs = result.get("recommendations", [])
@@ -290,7 +308,8 @@ with tab_recommend:
                 st.dataframe(candidates, use_container_width=True)
 
 # ---------------------------------------------------------------------------
-# Tab 2: Dataset chatbot (Hugging Face, gated to on-topic questions)
+# Tab 2: Dataset chatbot (Hugging Face, gated to on-topic questions,
+# remembers earlier messages so follow-ups work)
 # ---------------------------------------------------------------------------
 with tab_chat:
     if "chat_history" not in st.session_state:
@@ -301,10 +320,12 @@ with tab_chat:
         st.subheader("Ask the dataset")
         st.caption(
             "Powered by the same Hugging Face model, grounded in this dataset. "
-            "It'll only answer dataset-related questions — recommend an "
-            "artist, surface a random unheard track, describe a mood — and "
-            "will politely decline anything else (small talk, general trivia, "
-            "etc.). **It only knows about tracks in the loaded dataset** — it "
+            "It remembers the earlier messages in this chat, so you can ask "
+            "follow-ups like \"give me more of those\". It'll only answer "
+            "dataset-related questions — recommend an artist, surface a "
+            "random unheard track, describe a mood — and will politely "
+            "decline anything else (small talk, general trivia, etc.). "
+            "**It only knows about tracks in the loaded dataset** — it "
             "cannot answer about songs, artists, or releases outside it."
         )
     with clear_col:
@@ -325,13 +346,20 @@ with tab_chat:
     question = st.chat_input('e.g. "Recommend me a chill indie artist"')
 
     if question:
+        # History sent to the model: everything so far, minus refusals and
+        # error messages (they'd only confuse it).
+        history = [
+            (r, c) for r, c in st.session_state.chat_history
+            if c != REFUSAL_MESSAGE and not c.startswith(ERROR_PREFIXES)
+        ]
+
         st.session_state.chat_history.append(("user", question))
         with chat_box:
             with st.chat_message("user"):
                 st.write(question)
 
             with st.chat_message("assistant"):
-                if not is_dataset_related(question, vocab):
+                if not (is_dataset_related(question, vocab) or is_followup(question, history)):
                     answer = REFUSAL_MESSAGE
                     st.write(answer)
                 elif not hf_token:
@@ -339,9 +367,11 @@ with tab_chat:
                     st.warning(answer)
                 else:
                     try:
-                        answer = st.write_stream(ask_dataset_question_stream(hf_model, df, question))
+                        answer = st.write_stream(
+                            ask_dataset_question_stream(hf_model, df, question, history)
+                        )
                     except Exception as e:
-                        answer = f"Couldn't reach the Hugging Face model: {e}"
+                        answer = f"Something went wrong while generating the answer: {e}"
                         st.error(answer)
 
         st.session_state.chat_history.append(("assistant", answer))
