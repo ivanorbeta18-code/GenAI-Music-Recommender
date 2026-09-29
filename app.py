@@ -368,8 +368,8 @@ with tab_chat:
                 else:
                     try:
                         answer = st.write_stream(
-                             ask_dataset_question_stream(
-                                 hf_model=hf_model, df=df, question=question, history=history
+                            ask_dataset_question_stream(
+                                hf_model=hf_model, df=df, question=question, history=history
                             )
                         )
                     except Exception as e:
