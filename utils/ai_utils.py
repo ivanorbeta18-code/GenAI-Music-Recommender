@@ -193,7 +193,7 @@ def _build_chat_messages(df, question: str, history=None):
     return messages
 
 
-def ask_dataset_question(hf_model: str, df, question: str, history=None) -> str:
+def ask_dataset_question(hf_model: str, df, question: str, history=None, *args, **kwargs) -> str:
     """Non-streaming version. Caller is expected to have already checked
     relevance. `history` is a list of (role, content) tuples."""
     from huggingface_hub import InferenceClient
@@ -214,7 +214,7 @@ def ask_dataset_question(hf_model: str, df, question: str, history=None) -> str:
     return response.choices[0].message.content.strip()
 
 
-def ask_dataset_question_stream(hf_model: str, df, question: str, history=None):
+def ask_dataset_question_stream(hf_model: str, df, question: str, history=None, *args, **kwargs):
     """Streaming version: yields the answer chunk by chunk, meant to be
     passed straight to `st.write_stream()`. `history` is a list of
     (role, content) tuples from earlier in the conversation."""
