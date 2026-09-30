@@ -29,6 +29,16 @@ import streamlit as st
 # free-tier rate limits, try "HuggingFaceTB/SmolLM2-1.7B-Instruct" instead.
 DEFAULT_HF_MODEL = "Qwen/Qwen3-4B-Instruct-2507"
 
+# Max tokens the model may generate per chatbot answer.
+CHAT_MAX_TOKENS = 800          # was 1500; a 10-item list fits easily
+
+# Hard ceiling on how many items the chatbot may list in one answer.
+MAX_LIST_ITEMS = 10
+
+# Rows of dataset context sent to the model. Fewer rows = less temptation
+# to enumerate everything.
+CHAT_CONTEXT_ROWS = 40
+
 # Max tokens the model may generate per chatbot answer. Raised from 300 so
 # long lists don't get cut off mid-sentence.
 CHAT_MAX_TOKENS = 1500
@@ -188,7 +198,7 @@ def build_dataset_stats(df) -> str:
     return json.dumps(stats, ensure_ascii=False)
 
 
-def _build_chat_messages(df, question: str, history=None):
+def build_chat_context(df, question: str, history=None, max_rows: int = CHAT_CONTEXT_ROWS) -> str:
     """System prompt (with dataset excerpt) + the last few turns of the
     conversation + the new question."""
     context = build_chat_context(df, question, history)
@@ -199,14 +209,15 @@ def _build_chat_messages(df, question: str, history=None):
         "this dataset; if the data can't answer the question, say so "
         "plainly instead of guessing. Use the earlier messages in this "
         "conversation to understand what the user means by words like "
-        "'those', 'that artist', or 'more'. When the user asks for a list, "
-        "give as many items as they ask for (or as many as are useful) and "
-        "finish the list completely. For any question about totals, counts, "
-        "or averages across the whole dataset, use ONLY the 'Whole-dataset "
-        "statistics' below; the excerpt is just a small sample and must "
-        "never be counted.\n\nWhole-dataset statistics (JSON):\n"
-        + build_dataset_stats(df)
-        + "\n\nDataset excerpt (JSON, sample rows only):\n" + context
+        "'those', 'that artist', or 'more'. "
+        f"LIST LIMIT: never list more than {MAX_LIST_ITEMS} items in a "
+        "single answer, even if the data contains more. If the user asks "
+        f"for more than {MAX_LIST_ITEMS}, or for 'all' of something, give "
+        f"the best {MAX_LIST_ITEMS} and end with one short sentence "
+        "offering to show more. If they ask for a specific number "
+        f"{MAX_LIST_ITEMS} or lower, give exactly that many. Finish the "
+        "list cleanly; don't cut off mid-item.\n\n"
+        "Dataset excerpt (JSON):\n" + context
     )
     messages = [{"role": "system", "content": system_prompt}]
     for role, content in (history or [])[-HISTORY_TURNS:]:
