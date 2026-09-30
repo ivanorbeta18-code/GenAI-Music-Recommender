@@ -29,8 +29,9 @@ import streamlit as st
 # free-tier rate limits, try "HuggingFaceTB/SmolLM2-1.7B-Instruct" instead.
 DEFAULT_HF_MODEL = "Qwen/Qwen3-4B-Instruct-2507"
 
-# Max tokens the model may generate per chatbot answer.
-CHAT_MAX_TOKENS = 800          # was 1500; a 10-item list fits easily
+# Max tokens the model may generate per chatbot answer. Raised from 300 so
+# long lists don't get cut off mid-sentence.
+CHAT_MAX_TOKENS = 800
 
 # Hard ceiling on how many items the chatbot may list in one answer.
 MAX_LIST_ITEMS = 10
@@ -38,10 +39,6 @@ MAX_LIST_ITEMS = 10
 # Rows of dataset context sent to the model. Fewer rows = less temptation
 # to enumerate everything.
 CHAT_CONTEXT_ROWS = 40
-
-# Max tokens the model may generate per chatbot answer. Raised from 300 so
-# long lists don't get cut off mid-sentence.
-CHAT_MAX_TOKENS = 1500
 
 # How many past messages (user + assistant combined) are sent back to the
 # model so it can resolve "those", "that artist", "more", etc.
@@ -54,6 +51,14 @@ REFUSAL_MESSAGE = (
     "knowledge of music outside this dataset. Try asking something like "
     "\"recommend me a chill indie artist\" or \"give me a random unheard "
     "pop track\"."
+)
+
+# Shown (without calling the model) when the user asks for every song.
+LIST_ALL_WARNING = (
+    "Listing every song isn't viable. This dataset has about {total:,} tracks, "
+    "which would be an extremely long list, so I can show **at most 10** at a time.\n\n"
+    "Are you sure you want the top 10? Reply **yes** to continue, or narrow it "
+    "down (a genre, artist, or mood) so the 10 I pick fit what you want."
 )
 
 
@@ -154,7 +159,7 @@ def get_recommendations(hf_model, genres, artists, moods, popularity_range, cand
 # Hugging Face: dataset chatbot (with conversation history)
 # ---------------------------------------------------------------------------
 
-def build_chat_context(df, question: str, history=None, max_rows: int = 80) -> str:
+def build_chat_context(df, question: str, history=None, max_rows: int = CHAT_CONTEXT_ROWS) -> str:
     """Builds a small, relevant slice of the dataset as grounding context
     for the Hugging Face model, so it answers from real rows instead of
     hallucinating tracks or artists. Also looks at the last couple of user
@@ -181,24 +186,7 @@ def build_chat_context(df, question: str, history=None, max_rows: int = 80) -> s
     return json.dumps(records, ensure_ascii=False)
 
 
-def build_dataset_stats(df) -> str:
-    """Whole-dataset facts computed by pandas, so the model never has to
-    count or average rows from the small excerpt it is shown."""
-    stats = {"total_tracks": int(len(df))}
-    if "artist_name" in df.columns:
-        stats["unique_artists"] = int(df["artist_name"].nunique())
-    if "genre" in df.columns:
-        stats["unique_genres"] = int(df["genre"].nunique())
-        stats["genres"] = sorted(df["genre"].dropna().unique().tolist())
-    if "mood" in df.columns:
-        stats["tracks_per_mood"] = {k: int(v) for k, v in df["mood"].value_counts().items()}
-    for col in ["popularity", "danceability", "energy", "valence", "tempo"]:
-        if col in df.columns:
-            stats[f"average_{col}"] = round(float(df[col].mean()), 3)
-    return json.dumps(stats, ensure_ascii=False)
-
-
-def build_chat_context(df, question: str, history=None, max_rows: int = CHAT_CONTEXT_ROWS) -> str:
+def _build_chat_messages(df, question: str, history=None):
     """System prompt (with dataset excerpt) + the last few turns of the
     conversation + the new question."""
     context = build_chat_context(df, question, history)
@@ -216,7 +204,11 @@ def build_chat_context(df, question: str, history=None, max_rows: int = CHAT_CON
         f"the best {MAX_LIST_ITEMS} and end with one short sentence "
         "offering to show more. If they ask for a specific number "
         f"{MAX_LIST_ITEMS} or lower, give exactly that many. Finish the "
-        "list cleanly; don't cut off mid-item.\n\n"
+        "list cleanly; don't cut off mid-item. "
+        "CLARIFY WHEN UNSURE: if the request is vague or ambiguous (for "
+        "example no genre, artist, or mood is given, or it's unclear what "
+        "'those' refers to), do not guess. Ask ONE short clarifying "
+        "question instead of answering.\n\n"
         "Dataset excerpt (JSON):\n" + context
     )
     messages = [{"role": "system", "content": system_prompt}]
