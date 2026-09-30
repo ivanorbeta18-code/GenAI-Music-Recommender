@@ -31,14 +31,7 @@ DEFAULT_HF_MODEL = "Qwen/Qwen3-4B-Instruct-2507"
 
 # Max tokens the model may generate per chatbot answer. Raised from 300 so
 # long lists don't get cut off mid-sentence.
-CHAT_MAX_TOKENS = 800
-
-# Hard ceiling on how many items the chatbot may list in one answer.
-MAX_LIST_ITEMS = 10
-
-# Rows of dataset context sent to the model. Fewer rows = less temptation
-# to enumerate everything.
-CHAT_CONTEXT_ROWS = 40
+CHAT_MAX_TOKENS = 1500
 
 # How many past messages (user + assistant combined) are sent back to the
 # model so it can resolve "those", "that artist", "more", etc.
@@ -51,14 +44,6 @@ REFUSAL_MESSAGE = (
     "knowledge of music outside this dataset. Try asking something like "
     "\"recommend me a chill indie artist\" or \"give me a random unheard "
     "pop track\"."
-)
-
-# Shown (without calling the model) when the user asks for every song.
-LIST_ALL_WARNING = (
-    "Listing every song isn't viable. This dataset has about {total:,} tracks, "
-    "which would be an extremely long list, so I can show **at most 10** at a time.\n\n"
-    "Are you sure you want the top 10? Reply **yes** to continue, or narrow it "
-    "down (a genre, artist, or mood) so the 10 I pick fit what you want."
 )
 
 
@@ -159,7 +144,55 @@ def get_recommendations(hf_model, genres, artists, moods, popularity_range, cand
 # Hugging Face: dataset chatbot (with conversation history)
 # ---------------------------------------------------------------------------
 
-def build_chat_context(df, question: str, history=None, max_rows: int = CHAT_CONTEXT_ROWS) -> str:
+# Questions like "who sings X" / "singer of X" / "song by X" are lookups: if
+# the title isn't found we must say so instead of letting the model guess.
+LOOKUP_PATTERN = re.compile(
+    r"\b(who\s+(sings|sang|sing|wrote|made|is\s+the\s+(singer|artist))|"
+    r"(singer|artist|performer)\s+of|sung\s+by|which\s+artist)\b",
+    re.IGNORECASE,
+)
+
+# Single words too generic to count as a track-title match on their own.
+_GENERIC_WORDS = {
+    "the", "a", "an", "is", "are", "was", "who", "what", "when", "where",
+    "why", "how", "of", "for", "and", "or", "to", "in", "on", "at", "me",
+    "my", "you", "your", "i", "it", "this", "that", "song", "songs",
+    "track", "tracks", "artist", "singer", "sings", "sang", "music",
+    "best", "top", "more", "some", "any", "give", "tell", "about",
+}
+
+
+def find_title_matches(df, question: str, max_rows: int = 15):
+    """Rows whose track_name appears in the question, e.g. "save your tears".
+    Builds every 1-8 word phrase from the question and matches them against
+    lowercased track names with pandas (vectorised, no model involved).
+    Single generic words ("song", "best") are ignored."""
+    if "track_name" not in df.columns:
+        return df.iloc[0:0]
+    words = re.findall(r"[a-z0-9']+", question.lower())
+    phrases = set()
+    for n in range(1, 9):
+        for i in range(len(words) - n + 1):
+            chunk = words[i:i + n]
+            if n == 1 and (chunk[0] in _GENERIC_WORDS or len(chunk[0]) < 3):
+                continue
+            if all(w in _GENERIC_WORDS for w in chunk):
+                continue
+            phrases.add(" ".join(chunk))
+    if not phrases:
+        return df.iloc[0:0]
+    normalized = df["track_name"].str.lower().str.replace(r"[^a-z0-9' ]+", " ", regex=True) \
+        .str.replace(r"\s+", " ", regex=True).str.strip()
+    hits = df[normalized.isin(phrases)]
+    if hits.empty:
+        return hits
+    # Prefer the longest matching title (e.g. "save your tears" over "tears").
+    longest = normalized[hits.index].str.split().str.len().max()
+    hits = hits[normalized[hits.index].str.split().str.len() == longest]
+    return hits.sort_values("popularity", ascending=False).head(max_rows)
+
+
+def build_chat_context(df, question: str, history=None, max_rows: int = 80) -> str:
     """Builds a small, relevant slice of the dataset as grounding context
     for the Hugging Face model, so it answers from real rows instead of
     hallucinating tracks or artists. Also looks at the last couple of user
@@ -180,10 +213,49 @@ def build_chat_context(df, question: str, history=None, max_rows: int = CHAT_CON
             lambda a: any(w in words for w in re.findall(r"[a-z0-9']+", a))
         ).astype(int) * 3
 
+    cols = [c for c in ["track_name", "artist_name", "genre", "mood", "popularity"] if c in scored.columns]
+
+    # Rows whose track title is named in the question come first, so a
+    # lookup like "who sings save your tears" is answered from the real row.
+    title_hits = find_title_matches(df, question)
     top = scored.sort_values(["_hit", "popularity"], ascending=[False, False]).head(max_rows)
-    cols = [c for c in ["track_name", "artist_name", "genre", "mood", "popularity"] if c in top.columns]
-    records = top[cols].to_dict(orient="records")
-    return json.dumps(records, ensure_ascii=False)
+    if not title_hits.empty:
+        top = top[~top.index.isin(title_hits.index)]
+
+    parts = []
+    if not title_hits.empty:
+        parts.append(
+            "Rows whose track title appears in the user's question "
+            "(use these to answer; the artist_name here is the correct artist):\n"
+            + json.dumps(title_hits[cols].to_dict(orient="records"), ensure_ascii=False)
+        )
+    elif LOOKUP_PATTERN.search(question):
+        parts.append(
+            "NOTE: the song the user asked about was NOT found in the dataset. "
+            "Tell them it isn't in the dataset. Do NOT guess an artist."
+        )
+    parts.append(
+        "Sample rows (JSON):\n"
+        + json.dumps(top[cols].head(max_rows).to_dict(orient="records"), ensure_ascii=False)
+    )
+    return "\n\n".join(parts)
+
+
+def build_dataset_stats(df) -> str:
+    """Whole-dataset facts computed by pandas, so the model never has to
+    count or average rows from the small excerpt it is shown."""
+    stats = {"total_tracks": int(len(df))}
+    if "artist_name" in df.columns:
+        stats["unique_artists"] = int(df["artist_name"].nunique())
+    if "genre" in df.columns:
+        stats["unique_genres"] = int(df["genre"].nunique())
+        stats["genres"] = sorted(df["genre"].dropna().unique().tolist())
+    if "mood" in df.columns:
+        stats["tracks_per_mood"] = {k: int(v) for k, v in df["mood"].value_counts().items()}
+    for col in ["popularity", "danceability", "energy", "valence", "tempo"]:
+        if col in df.columns:
+            stats[f"average_{col}"] = round(float(df[col].mean()), 3)
+    return json.dumps(stats, ensure_ascii=False)
 
 
 def _build_chat_messages(df, question: str, history=None):
@@ -197,19 +269,16 @@ def _build_chat_messages(df, question: str, history=None):
         "this dataset; if the data can't answer the question, say so "
         "plainly instead of guessing. Use the earlier messages in this "
         "conversation to understand what the user means by words like "
-        "'those', 'that artist', or 'more'. "
-        f"LIST LIMIT: never list more than {MAX_LIST_ITEMS} items in a "
-        "single answer, even if the data contains more. If the user asks "
-        f"for more than {MAX_LIST_ITEMS}, or for 'all' of something, give "
-        f"the best {MAX_LIST_ITEMS} and end with one short sentence "
-        "offering to show more. If they ask for a specific number "
-        f"{MAX_LIST_ITEMS} or lower, give exactly that many. Finish the "
-        "list cleanly; don't cut off mid-item. "
-        "CLARIFY WHEN UNSURE: if the request is vague or ambiguous (for "
-        "example no genre, artist, or mood is given, or it's unclear what "
-        "'those' refers to), do not guess. Ask ONE short clarifying "
-        "question instead of answering.\n\n"
-        "Dataset excerpt (JSON):\n" + context
+        "'those', 'that artist', or 'more'. When the user asks for a list, "
+        "give as many items as they ask for (or as many as are useful) and "
+        "finish the list completely. When asked who sings/made a song, answer "
+        "ONLY from the artist_name of the matching row; if no row matches, "
+        "say the song isn't in the dataset. For any question about totals, counts, "
+        "or averages across the whole dataset, use ONLY the 'Whole-dataset "
+        "statistics' below; the excerpt is just a small sample and must "
+        "never be counted.\n\nWhole-dataset statistics (JSON):\n"
+        + build_dataset_stats(df)
+        + "\n\nDataset context:\n" + context
     )
     messages = [{"role": "system", "content": system_prompt}]
     for role, content in (history or [])[-HISTORY_TURNS:]:
