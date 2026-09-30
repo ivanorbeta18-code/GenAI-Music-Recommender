@@ -31,12 +31,20 @@ import streamlit as st
 
 from utils.ai_utils import (
     DEFAULT_HF_MODEL,
+    LIST_ALL_WARNING,
     REFUSAL_MESSAGE,
     ask_dataset_question_stream,
     get_hf_token,
     get_recommendations,
 )
-from utils.data_utils import build_vocab, filter_candidates, is_dataset_related, load_dataset
+from utils.data_utils import (
+    build_vocab,
+    filter_candidates,
+    is_affirmative,
+    is_dataset_related,
+    is_list_all_request,
+    load_dataset,
+)
 from utils.theme import (
     MOOD_COLORS,
     genre_badge,
@@ -56,7 +64,7 @@ FOLLOWUP_WORDS = {
 }
 
 # Messages that shouldn't be sent back to the model as conversation history.
-ERROR_PREFIXES = ("Something went wrong", "Add HF_TOKEN")
+ERROR_PREFIXES = ("Something went wrong", "Add HF_TOKEN", "Listing every song")
 
 
 def is_followup(question: str, history) -> bool:
@@ -346,12 +354,16 @@ with tab_chat:
     question = st.chat_input('e.g. "Recommend me a chill indie artist"')
 
     if question:
-        # History sent to the model: everything so far, minus refusals and
-        # error messages (they'd only confuse it).
+        # History sent to the model: everything so far, minus refusals,
+        # warnings and error messages (they'd only confuse it).
         history = [
             (r, c) for r, c in st.session_state.chat_history
             if c != REFUSAL_MESSAGE and not c.startswith(ERROR_PREFIXES)
         ]
+
+        # If we previously asked "are you sure?", check for a confirmation.
+        pending = st.session_state.pop("pending_list_all", None)
+        confirmed = bool(pending) and is_affirmative(question)
 
         st.session_state.chat_history.append(("user", question))
         with chat_box:
@@ -359,7 +371,19 @@ with tab_chat:
                 st.write(question)
 
             with st.chat_message("assistant"):
-                if not (is_dataset_related(question, vocab) or is_followup(question, history)):
+                if confirmed:
+                    # Re-send the ORIGINAL request, capped at 10.
+                    model_question = pending + " (Show only the top 10, no more.)"
+                    relevant = True
+                else:
+                    model_question = question
+                    relevant = is_dataset_related(question, vocab) or is_followup(question, history)
+
+                if not confirmed and is_list_all_request(question):
+                    st.session_state["pending_list_all"] = question
+                    answer = LIST_ALL_WARNING.format(total=len(df))
+                    st.write(answer)
+                elif not relevant:
                     answer = REFUSAL_MESSAGE
                     st.write(answer)
                 elif not hf_token:
@@ -369,7 +393,10 @@ with tab_chat:
                     try:
                         answer = st.write_stream(
                             ask_dataset_question_stream(
-                                hf_model=hf_model, df=df, question=question, history=history
+                                hf_model=hf_model,
+                                df=df,
+                                question=model_question,
+                                history=history,
                             )
                         )
                     except Exception as e:
