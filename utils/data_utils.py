@@ -196,3 +196,27 @@ def is_dataset_related(query: str, vocab: dict) -> bool:
         return True
 
     return any(phrase in q_lower for phrase in vocab["artist_phrases"])
+
+
+# ---------------------------------------------------------------------------
+# "List everything" detection + confirmation helpers
+# ---------------------------------------------------------------------------
+
+LIST_ALL_PATTERN = re.compile(
+    r"\b(all|every|entire|whole|complete|everything)\b.*\b(songs?|tracks?|artists?|tracklist|list|dataset)\b"
+    r"|\blist\s+(everything|them\s+all)\b",
+    re.IGNORECASE,
+)
+
+AFFIRMATIVE_WORDS = {"yes", "yeah", "yep", "sure", "ok", "okay", "go", "proceed", "continue", "please"}
+
+
+def is_list_all_request(query: str) -> bool:
+    """True if the user is asking for every song/track/artist."""
+    return bool(LIST_ALL_PATTERN.search(query))
+
+
+def is_affirmative(query: str) -> bool:
+    """True for short confirmations like 'yes' or 'sure, go ahead'."""
+    words = set(re.findall(r"[a-z']+", query.lower()))
+    return bool(words) and len(words) <= 5 and bool(words & AFFIRMATIVE_WORDS)
